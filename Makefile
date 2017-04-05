@@ -1,3 +1,4 @@
+KDIR=/lib/modules/`uname -r`/build
 obj-m += suterusu.o
 suterusu-objs := main.o util.o module.o
 
